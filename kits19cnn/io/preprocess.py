@@ -20,7 +20,7 @@ class Preprocessor(object):
         * resampling from `orig_spacing` to `target_spacing`
             currently uses spacing reported in the #1 solution
     """
-    def __init__(self, in_dir, out_dir, cases=None, kits_json_path=None,
+    def __init__(self, in_dir, out_dir, cases=None, resample=True,
                  target_spacing=(3.22, 1.62, 1.62),
                  clip_values=None, with_mask=False, fg_classes=[1, 2]):
         """
@@ -29,9 +29,7 @@ class Preprocessor(object):
                 kits19/data directory.
             out_dir (str): output directory where you want to save each case
             cases: list of case folders to preprocess
-            kits_json_path (str): path to the kits.json file in the kits19/data
-                directory. This only should be specfied if you're resampling.
-                Defaults to None.
+            resample (bool): whether or not to resample the data
             target_spacing (list/tuple): spacing to resample to
             clip_values (list, tuple): values you want to clip CT scans to.
                 Defaults to None for no clipping.
@@ -42,8 +40,7 @@ class Preprocessor(object):
         """
         self.in_dir = in_dir
         self.out_dir = out_dir
-
-        self._load_kits_json(kits_json_path)
+        self.resample = resample
         self.clip_values = clip_values
         self.target_spacing = np.array(target_spacing)
         self.with_mask = with_mask
@@ -73,45 +70,41 @@ class Preprocessor(object):
         # Generating data and saving them recursively
         for case in tqdm(self.cases):
             x_path, y_path = join(case, "imaging.nii.gz"), join(case, "segmentation.nii.gz")
-            image = nib.load(x_path).get_fdata()[None]
-            label = nib.load(y_path).get_fdata()[None] if self.with_mask \
-                    else None
+            image = nib.load(x_path)
+            mask = nib.load(y_path) if self.with_mask \
+                else None
             preprocessed_img, preprocessed_label = self.preprocess(image,
-                                                                   label,
-                                                                   case)
+                                                                   mask)
 
             self.save_imgs(preprocessed_img, preprocessed_label, case)
 
-    def preprocess(self, image, mask, case=None):
+    def preprocess(self, image_file, mask_file):
         """
         Clipping, cropping, and resampling.
         Args:
-            image: numpy array
-            mask: numpy array or None
-            case (str): path to a case folder
+            image_file: FileBasedImage
+            mask_file: FileBasedImage
         Returns:
             tuple of:
                 - preprocessed image
                 - preprocessed mask or None
         """
-        raw_case = Path(case).name # raw case name, i.e. case_00000
-        if self.target_spacing is not None:
-            for info_dict in self.kits_json:
-                # guaranteeing that the info is corresponding to the right
-                # case
-                if info_dict["case_id"] == raw_case:
-                    case_info_dict = info_dict
-                    break
-            orig_spacing = (case_info_dict["captured_slice_thickness"],
-                            case_info_dict["captured_pixel_width"],
-                            case_info_dict["captured_pixel_width"])
+
+        image = image_file.get_fdata()[None]
+        mask = mask_file.get_fdata()[None] if self.with_mask \
+            else None
+        if self.target_spacing is not None and self.resample:
+            # getting the original spacing from header of the nii file
+            image_header = image_file.header
+            orig_spacing = image_header["pixdim"][1:4]
+
             image, mask = resample_patient(image, mask, np.array(orig_spacing),
                                            target_spacing=self.target_spacing)
         if self.clip_values is not None:
             image = np.clip(image, self.clip_values[0], self.clip_values[1])
 
         mask = mask[None] if mask is not None else mask
-        return (image[None], mask)
+        return image[None], mask
 
     def save_imgs(self, image, mask, case):
         """
@@ -228,13 +221,3 @@ class Preprocessor(object):
               f"class separately at {save_path_general}.")
         with open(save_path_general, "w") as fp:
             json.dump(general_slice_dict, fp)
-
-    def _load_kits_json(self, json_path):
-        """
-        Loads the kits.json file into `self.kits_json`
-        """
-        if json_path is None:
-            print("`kits_json_path is empty, so not resampling.`")
-        elif json_path is not None:
-            with open(json_path, "r") as fp:
-                self.kits_json = json.load(fp)
